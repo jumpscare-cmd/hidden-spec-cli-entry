@@ -8,7 +8,7 @@
 // over to runner.ts (the last lines below): keep that hand-over and runner.ts as they are, and
 // write the CLI.
 
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const FORMATS = ['auto', 'unified', 'search-replace', 'v4a', 'json'];
@@ -956,13 +956,33 @@ function run(args: string[]): { code: number; out: string[] } {
   entries.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
   const rows = entries.map((e) => e.line);
   if (!check) {
-    for (const p of changed) {
-      const now = tree.now.get(p)!;
-      if (now === null) rmSync(p, { force: true });
-      else {
-        mkdirSync(dirname(p), { recursive: true });
-        writeFileSync(p, now);
+    // Delete first: a deleted file must not block a file created at an
+    // ancestor path (a patch may delete sub/f.txt and create sub, or move
+    // a/f.txt to a). Then drop directories the deletions emptied, deepest
+    // first, so a file can take an ancestor's place.
+    const dels = changed.filter((p) => tree.now.get(p) === null);
+    const writes = changed.filter((p) => tree.now.get(p) !== null);
+    for (const p of dels) rmSync(p, { force: true });
+    const emptied = new Set<string>();
+    for (const p of dels) {
+      let d = dirname(p);
+      while (d !== '.' && d !== '') {
+        emptied.add(d);
+        d = dirname(d);
       }
+    }
+    for (const d of [...emptied].sort((a, b) => b.split('/').length - a.split('/').length)) {
+      try {
+        // rmdirSync only removes an empty directory, so a directory that
+        // still holds files the patch did not delete is left alone.
+        if (statSync(d).isDirectory()) rmdirSync(d);
+      } catch {
+        // Still holds files, or is not a directory: leave it.
+      }
+    }
+    for (const p of writes) {
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, tree.now.get(p)!);
     }
   }
   return { code: 0, out: [...rows, `ok: ${rows.length} ${rows.length === 1 ? 'file' : 'files'}`] };
